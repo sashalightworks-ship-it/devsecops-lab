@@ -1,0 +1,42 @@
+
+# Этап 1. Установка зависимостей
+FROM python:3.13-slim-trixie AS builder
+
+ENV PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+WORKDIR /build
+
+COPY requirements.txt .
+
+RUN pip install --no-cache-dir \
+    --target /opt/python \
+    -r requirements.txt
+
+# Этап 2. Минимальный образ без shell и pip
+FROM gcr.io/distroless/python3-debian13:nonroot
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/opt/python
+
+WORKDIR /app
+
+COPY --from=builder /opt/python /opt/python
+COPY app.py /app/app.py
+
+# Явное указание непривилегированного UID/GID
+USER 10001:10001
+
+EXPOSE 5000
+
+HEALTHCHECK --interval=30s --timeout=3s \
+    --start-period=10s --retries=3 \
+    CMD ["/usr/bin/python3", "-c", "import urllib.request as u; u.urlopen('http://localhost:5000/health')"]
+
+# Запуск Gunicorn без командной оболочки
+ENTRYPOINT ["/usr/bin/python3"]
+
+CMD ["-m", "gunicorn", "--bind", "0.0.0.0:5000", \
+     "--workers", "2", "--access-logfile", "-", \
+     "--worker-tmp-dir", "/tmp", "app:app"]

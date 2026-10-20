@@ -1,25 +1,26 @@
+
 # -*- mode: ruby -*-
 # vi: set ft=ruby :
 
 VM_IP = "192.168.56.10"
+TRIVY_VERSION = "0.74.0"
 
 Vagrant.configure("2") do |config|
-  # Canonical не публикует официальные Vagrant-боксы начиная с Ubuntu 24.04
   config.vm.box = "ubuntu/jammy64"
   config.vm.box_url = "https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64-vagrant.box"
   config.vm.box_check_update = false
-
   config.vm.hostname = "devsecops-vm"
 
-  # Host-only сеть: хост обращается к VM по фиксированному адресу
+  # Сеть виртуальной машины
   config.vm.network "private_network", ip: VM_IP
-
-  # Порт приложения 8080 доступен как localhost:8080 на хосте.
-  # Порт 5000 не пробрасываем: реестр доступен по VM_IP:5000
   config.vm.network "forwarded_port",
     guest: 8080,
     host: 8080,
     host_ip: "127.0.0.1"
+
+  # Подключаем весь проект из родительского каталога.
+  config.vm.synced_folder File.expand_path("..", __dir__),
+    "/home/vagrant/devsecops-lab"
 
   config.vm.provider "virtualbox" do |vb|
     vb.name = "devsecops-vm"
@@ -27,24 +28,79 @@ Vagrant.configure("2") do |config|
     vb.cpus = 1
   end
 
-  # config.ssh.insert_key не отключаем:
-  # Vagrant создаст собственную пару SSH-ключей
-
+  # Настройка Docker
   config.vm.provision "shell", name: "docker", inline: <<-SHELL
     set -euo pipefail
     export DEBIAN_FRONTEND=noninteractive
 
     apt-get update
-    apt-get install -y docker.io docker-buildx curl
+    apt-get install -y docker.io docker-buildx curl ca-certificates
 
-    # Docker без sudo только для пользователя vagrant
     usermod -aG docker vagrant
 
-    # Разрешаем HTTP-доступ к учебному реестру
     mkdir -p /etc/docker
-    echo '{ "insecure-registries": ["#{VM_IP}:5000"] }' > /etc/docker/daemon.json
+
+    cat > /etc/docker/daemon.json <<'EOF'
+{
+  "insecure-registries": ["#{VM_IP}:5000", "localhost:5000"]
+}
+EOF
 
     systemctl enable docker
     systemctl restart docker
+  SHELL
+
+  # Установка Trivy с проверкой SHA256
+  config.vm.provision "shell", name: "trivy", inline: <<-SHELL
+    set -euo pipefail
+
+    VERSION="#{TRIVY_VERSION}"
+    EXPECTED_CHECKSUM="bc701c3c3ee8b9acbea2c23257e41381e3854888f51281616a6ba5dc96963821"
+
+    if command -v trivy >/dev/null 2>&1 &&
+       trivy --version | grep -q "Version: $VERSION"; then
+      echo "Trivy $VERSION уже установлен"
+    else
+      TMP_DIR=$(mktemp -d)
+      trap 'rm -rf "$TMP_DIR"' EXIT
+
+      cd "$TMP_DIR"
+
+      BASE="https://github.com/aquasecurity/trivy/releases/download/v$VERSION"
+
+      curl -fsSLO "$BASE/trivy_${VERSION}_Linux-64bit.tar.gz"
+      curl -fsSLO "$BASE/trivy_${VERSION}_checksums.txt"
+
+      echo "$EXPECTED_CHECKSUM  trivy_${VERSION}_checksums.txt" | sha256sum -c -
+
+      sha256sum --ignore-missing -c "trivy_${VERSION}_checksums.txt"
+
+      tar -xzf "trivy_${VERSION}_Linux-64bit.tar.gz" trivy
+      install -m 0755 trivy /usr/local/bin/trivy
+
+      trivy --version
+    fi
+  SHELL
+
+  # Автоматический запуск Docker Registry
+  config.vm.provision "shell", name: "registry", inline: <<-SHELL
+    set -euo pipefail
+
+    docker volume create registry-data >/dev/null
+
+    if ! docker container inspect registry >/dev/null 2>&1; then
+      docker run -d \
+        --name registry \
+        --restart always \
+        -p 5000:5000 \
+        -v registry-data:/var/lib/registry \
+        registry:3
+    else
+      docker update --restart always registry >/dev/null
+      docker start registry >/dev/null || true
+    fi
+
+    echo "Registry:"
+    docker ps --filter name=registry
   SHELL
 end
