@@ -1,0 +1,59 @@
+
+name: ci-cd
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Минимальные права для токена GITHUB_TOKEN
+permissions:
+  contents: read
+
+env:
+  TRIVY_VERSION: "0.74.0" # фиксированная версия
+  IMAGE: my-app:${{ github.sha }}
+
+jobs:
+  build-test-scan:
+    runs-on: ubuntu-24.04
+
+    steps:
+      # Actions закреплены по полному SHA коммита.
+      # Версии указаны в комментариях.
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.13"
+
+      - name: Unit tests
+        working-directory: app
+        run: |
+          pip install -r requirements.txt pytest
+          python -m pytest -q
+
+      - name: Install Trivy (pinned version + checksum)
+        run: |
+          base="https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}"
+          curl -sSfLO "${base}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          curl -sSfLO "${base}/trivy_${TRIVY_VERSION}_checksums.txt"
+          sha256sum --ignore-missing -c "trivy_${TRIVY_VERSION}_checksums.txt"
+          tar -xzf "trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" trivy
+          sudo install -m 0755 trivy /usr/local/bin/trivy
+          trivy --version
+
+      - name: Lint Dockerfile
+        run: trivy config --exit-code 1 --severity CRITICAL,HIGH app/Dockerfile
+
+      - name: Build image
+        run: docker build -t "$IMAGE" app
+
+      - name: Scan image (quality gate)
+        run: >-
+          trivy image --exit-code 1 --ignore-unfixed
+          --severity CRITICAL,HIGH "$IMAGE"
